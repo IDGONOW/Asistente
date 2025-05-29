@@ -1,123 +1,117 @@
 const express = require('express');
-const session = require('express-session');
-const { google } = require('googleapis');
 const bodyParser = require('body-parser');
 const axios = require('axios');
+const chrono = require('chrono-node');
+const { google } = require('googleapis');
+const session = require('express-session');
+const path = require('path');
 
 const app = express();
-app.use(bodyParser.json());
-
 const TELEGRAM_TOKEN = process.env.TELEGRAM_TOKEN;
-const CLIENT_ID = process.env.CLIENT_ID;
-const CLIENT_SECRET = process.env.CLIENT_SECRET;
-const REDIRECT_URI = process.env.REDIRECT_URI || 'https://asistente.up.railway.app/oauth2callback';
 
-const oAuth2Client = new google.auth.OAuth2(CLIENT_ID, CLIENT_SECRET, REDIRECT_URI);
-let accessToken = null;
+const oAuth2Client = new google.auth.OAuth2(
+  process.env.GOOGLE_CLIENT_ID,
+  process.env.GOOGLE_CLIENT_SECRET,
+  `https://${process.env.RAILWAY_STATIC_URL}/auth/callback`
+);
 
-app.use(session({
-  secret: 'asistentevirtual',
-  resave: false,
-  saveUninitialized: true,
-}));
+app.use(bodyParser.json());
+app.use(session({ secret: 'asistente-secret', resave: false, saveUninitialized: true }));
 
-// RUTA 1: Autenticación
+// Página de autenticación
 app.get('/auth', (req, res) => {
   const authUrl = oAuth2Client.generateAuthUrl({
     access_type: 'offline',
-    scope: [
-      'https://www.googleapis.com/auth/tasks',
-      'https://www.googleapis.com/auth/calendar'
-    ],
+    scope: ['https://www.googleapis.com/auth/calendar', 'https://www.googleapis.com/auth/tasks']
   });
   res.redirect(authUrl);
 });
 
-// RUTA 2: Callback de OAuth
-app.get('/oauth2callback', async (req, res) => {
+// Callback de autenticación
+app.get('/auth/callback', async (req, res) => {
   const { code } = req.query;
-  try {
-    const { tokens } = await oAuth2Client.getToken(code);
-    oAuth2Client.setCredentials(tokens);
-    accessToken = tokens.access_token;
-    res.send('✅ Autenticación exitosa. Puedes volver a Telegram.');
-  } catch (error) {
-    res.send('❌ Error en la autenticación: ' + error.message);
-  }
+  const { tokens } = await oAuth2Client.getToken(code);
+  oAuth2Client.setCredentials(tokens);
+  req.session.tokens = tokens;
+  res.send('✅ Autenticación exitosa. Puedes volver a Telegram.');
 });
 
-// RUTA 3: Webhook para mensajes de Telegram
+// Webhook de Telegram
 app.post('/webhook', async (req, res) => {
-  console.log('📩 Webhook recibido:', JSON.stringify(req.body));
   const message = req.body.message;
-
   if (!message || !message.text) return res.sendStatus(200);
 
-  const text = message.text.toLowerCase();
   const chatId = message.chat.id;
+  const text = message.text;
 
   console.log('📨 Mensaje recibido:', text);
 
-  try {
-    if (text.startsWith('agregar tarea:')) {
-      const tarea = message.text.split(':')[1].trim();
-      const tasks = google.tasks({ version: 'v1', auth: oAuth2Client });
+  // Asegurar credenciales
+  if (!oAuth2Client.credentials || !oAuth2Client.credentials.access_token) {
+    return await sendMessage(chatId, '❌ Primero necesitas autenticarte en https://' + process.env.RAILWAY_STATIC_URL + '/auth');
+  }
 
-      const nueva = await tasks.tasks.insert({
+  oAuth2Client.setCredentials(oAuth2Client.credentials);
+
+  if (text.toLowerCase().startsWith('agregar tarea:')) {
+    const tarea = text.split(':')[1].trim();
+    const tasks = google.tasks({ version: 'v1', auth: oAuth2Client });
+
+    try {
+      await tasks.tasks.insert({
         tasklist: '@default',
-        requestBody: {
-          title: tarea
-        }
+        requestBody: { title: tarea }
       });
-
       await sendMessage(chatId, `✅ Tarea creada: ${tarea}`);
+    } catch (error) {
+      console.error('❌ Error al crear tarea:', error);
+      await sendMessage(chatId, '❌ No se pudo crear la tarea.');
     }
 
-    else if (text.startsWith('crear reunion:')) {
-      const resumen = message.text.split(':')[1].trim();
-      const calendar = google.calendar({ version: 'v3', auth: oAuth2Client });
-      const now = new Date();
-      const fin = new Date(now.getTime() + 30 * 60000); // 30 min
+  } else if (text.toLowerCase().startsWith('crear reunion:')) {
+    const resumen = text.split(':')[1].trim();
+    const parsedDate = chrono.parseDate(resumen);
+    const startTime = parsedDate || new Date();
+    const endTime = new Date(startTime.getTime() + 30 * 60000);
 
-      const evento = await calendar.events.insert({
+    const calendar = google.calendar({ version: 'v3', auth: oAuth2Client });
+
+    try {
+      await calendar.events.insert({
         calendarId: 'primary',
         requestBody: {
           summary: resumen,
-          start: { dateTime: now.toISOString() },
-          end: { dateTime: fin.toISOString() }
+          start: { dateTime: startTime.toISOString() },
+          end: { dateTime: endTime.toISOString() }
         }
       });
-
       await sendMessage(chatId, `📅 Reunión creada: ${resumen}`);
+    } catch (error) {
+      console.error('❌ Error al crear reunión:', error);
+      await sendMessage(chatId, '❌ No se pudo crear la reunión.');
     }
 
-    else {
-      await sendMessage(chatId, '🤖 Comando no reconocido. Usa:\n- Agregar tarea: [texto]\n- Crear reunion: [texto]');
-    }
-
-  } catch (err) {
-    console.error('❌ Error:', err);
-    await sendMessage(chatId, '⚠️ Error al procesar tu solicitud.');
+  } else {
+    await sendMessage(chatId, '🤖 Puedes decirme:\n- Agregar tarea: [tarea]\n- Crear reunion: [reunión con fecha]');
   }
 
   res.sendStatus(200);
 });
 
-// Función para responder en Telegram
+// Función para enviar mensajes a Telegram
 async function sendMessage(chatId, text) {
-  const url = `https://api.telegram.org/bot${TELEGRAM_TOKEN}/sendMessage`;
   try {
+    const url = `https://api.telegram.org/bot${TELEGRAM_TOKEN}/sendMessage`;
     const res = await axios.post(url, {
       chat_id: chatId,
       text: text
     });
-    console.log('✅ Mensaje enviado a Telegram:', res.data);
+    console.log('✅ Mensaje enviado:', res.data);
   } catch (error) {
-    console.error('❌ Error al enviar mensaje a Telegram:', error.response?.data || error.message);
+    console.error('❌ Error al enviar mensaje:', error.response?.data || error.message);
   }
 }
 
-// Iniciar servidor
 const PORT = process.env.PORT || 8080;
 app.listen(PORT, () => {
   console.log(`🚀 Escuchando en puerto ${PORT}`);
