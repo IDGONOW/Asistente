@@ -141,6 +141,3 @@ app.get('/', (req, res) => res.send('✅ Asistente activo'));
 const PORT = process.env.PORT || 8080;
 app.listen(PORT, () => console.log(`🚀 Escuchando en puerto ${PORT}`));
 
-
-const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => console.log(`🚀 Escuchando en puerto ${PORT}`));
