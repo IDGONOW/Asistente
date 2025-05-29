@@ -49,29 +49,39 @@ app.get('/oauth2callback', async (req, res) => {
   }
 });
 
-// 📩 Webhook de Telegram
+// 📩 Webhook de Telegram con logs
 const processedMessages = new Set();
 
 app.post('/webhook', async (req, res) => {
-  const message = req.body.message;
-  if (!message || !message.text) return res.sendStatus(200);
-
-  const chatId = message.chat.id;
-  const text = message.text.trim();
-  const messageId = message.message_id;
-  const key = `${chatId}_${messageId}`;
-
-  if (processedMessages.has(key)) return res.sendStatus(200);
-  processedMessages.add(key);
-
-  if (!accessToken) {
-    await sendMessage(chatId, '🔐 Primero necesitas autorizarme aquí:\n' + REDIRECT_URI.replace('/oauth2callback', '/auth'));
-    return res.sendStatus(200);
-  }
-
-  oAuth2Client.setCredentials(accessToken);
+  console.log('📩 Webhook recibido:', JSON.stringify(req.body));
 
   try {
+    const message = req.body.message;
+    if (!message || !message.text) {
+      console.log('⚠️ Mensaje vacío o sin texto');
+      return res.sendStatus(200);
+    }
+
+    const chatId = message.chat.id;
+    const text = message.text.trim();
+    const messageId = message.message_id;
+    const key = `${chatId}_${messageId}`;
+
+    console.log('📨 Mensaje recibido:', text);
+
+    if (processedMessages.has(key)) {
+      console.log('🔁 Mensaje ya procesado:', key);
+      return res.sendStatus(200);
+    }
+    processedMessages.add(key);
+
+    if (!accessToken) {
+      await sendMessage(chatId, '🔐 Primero necesitas autorizarme aquí:\n' + REDIRECT_URI.replace('/oauth2callback', '/auth'));
+      return res.sendStatus(200);
+    }
+
+    oAuth2Client.setCredentials(accessToken);
+
     if (text.toLowerCase().startsWith('agregar tarea')) {
       const tarea = text.replace(/^agregar tarea[:\-]?\s*/i, '');
       await agregarTareaGoogle(tarea);
@@ -83,15 +93,15 @@ app.post('/webhook', async (req, res) => {
     } else {
       await sendMessage(chatId, `👋 Hola, soy tu asistente personal.\n\nComandos:\n- Agregar tarea: enviar informe\n- Crear reunión: reunión equipo`);
     }
-  } catch (error) {
-    console.error("❌ Error en webhook:", error.message);
-    await sendMessage(chatId, "❌ Ocurrió un error procesando tu solicitud.");
-  }
 
-  res.sendStatus(200);
+    res.sendStatus(200);
+  } catch (error) {
+    console.error("❌ Error en webhook:", error);
+    res.sendStatus(500); // evita 502 Bad Gateway
+  }
 });
 
-// ✅ Enviar mensaje a Telegram (mejorado con log de respuesta)
+// ✅ Enviar mensaje a Telegram con log
 async function sendMessage(chatId, text) {
   try {
     const res = await axios.post(`${TELEGRAM_API}/sendMessage`, {
@@ -119,7 +129,7 @@ async function agregarTareaGoogle(titulo) {
   console.log('🗂️ Tarea creada:', titulo);
 }
 
-// ✅ Crear evento en Google Calendar (con log)
+// ✅ Crear evento en Google Calendar
 async function crearEventoCalendar(titulo) {
   const calendar = google.calendar({ version: 'v3', auth: oAuth2Client });
   const ahora = new Date();
@@ -135,9 +145,10 @@ async function crearEventoCalendar(titulo) {
   console.log('📅 Evento creado en Calendar:', titulo);
 }
 
-// 🌐 Ruta raíz
+// 🟢 Ruta raíz
 app.get('/', (req, res) => res.send('✅ Asistente activo'));
 
 const PORT = process.env.PORT || 8080;
 app.listen(PORT, () => console.log(`🚀 Escuchando en puerto ${PORT}`));
+
 
