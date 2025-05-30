@@ -9,35 +9,33 @@ const app = express();
 app.use(bodyParser.json());
 app.use(session({ secret: 'asistente-secret', resave: false, saveUninitialized: true }));
 
-// Captura de variables con fallback
+// Soporte de variables de entorno múltiples
 const CLIENT_ID = process.env.GOOGLE_CLIENT_ID || process.env.CLIENT_ID;
 const CLIENT_SECRET = process.env.GOOGLE_CLIENT_SECRET || process.env.CLIENT_SECRET;
-const REDIRECT_URI =
-  process.env.REDIRECT_URI || `https://${process.env.RAILWAY_STATIC_URL}/auth/oauth2callback`;
-
+const REDIRECT_URI = process.env.REDIRECT_URI || `https://${process.env.RAILWAY_STATIC_URL}/oauth2callback`;
 const TELEGRAM_TOKEN = process.env.TELEGRAM_TOKEN;
 
 if (!CLIENT_ID || !CLIENT_SECRET) {
-  console.error('❌ CLIENT_ID o CLIENT_SECRET faltan. Revisa tus variables de entorno.');
+  console.error('❌ Faltan CLIENT_ID o CLIENT_SECRET en las variables de entorno.');
   process.exit(1);
 }
 
 const oAuth2Client = new google.auth.OAuth2(CLIENT_ID, CLIENT_SECRET, REDIRECT_URI);
 
-// ----------- RUTAS -----------
-
-app.get('/oauth2callback', (req, res) => {
+// RUTA: Iniciar autenticación con Google
+app.get('/auth', (req, res) => {
   const url = oAuth2Client.generateAuthUrl({
     access_type: 'offline',
     scope: [
       'https://www.googleapis.com/auth/tasks',
       'https://www.googleapis.com/auth/calendar'
-    ],
+    ]
   });
   res.redirect(url);
 });
 
-app.get('/auth/back', async (req, res) => {
+// RUTA: Callback de Google OAuth2
+app.get('/oauth2callback', async (req, res) => {
   const code = req.query.code;
   try {
     const { tokens } = await oAuth2Client.getToken(code);
@@ -45,36 +43,41 @@ app.get('/auth/back', async (req, res) => {
     req.session.tokens = tokens;
     res.send('✅ Autenticación exitosa. Puedes volver a Telegram.');
   } catch (error) {
-    console.error('❌ Error en el callback:', error.message);
-    res.send('❌ Error al autenticar con Google.');
+    console.error('❌ Error durante la autenticación:', error.message);
+    res.send('❌ Error al procesar autenticación.');
   }
 });
 
+// RUTA: Webhook para mensajes de Telegram
 app.post('/webhook', async (req, res) => {
   const msg = req.body.message;
   if (!msg || !msg.text) return res.sendStatus(200);
 
   const chatId = msg.chat.id;
-  const text = msg.text.trim().toLowerCase();
+  const text = msg.text.trim();
 
   try {
     if (!oAuth2Client.credentials || !oAuth2Client.credentials.access_token) {
-      await sendMessage(chatId, `🔐 Antes de continuar, debes autorizar en: https://${process.env.RAILWAY_STATIC_URL}/auth`);
+      await sendMessage(chatId, `🔐 Por favor, autorízame en: https://${process.env.RAILWAY_STATIC_URL}/auth`);
       return res.sendStatus(200);
     }
 
     oAuth2Client.setCredentials(oAuth2Client.credentials);
 
-    if (text.startsWith('agregar tarea:')) {
-      const tarea = msg.text.split(':')[1].trim();
+    if (text.toLowerCase().startsWith('agregar tarea:')) {
+      const tarea = text.split(':')[1].trim();
       const tasks = google.tasks({ version: 'v1', auth: oAuth2Client });
 
-      await tasks.tasks.insert({ tasklist: '@default', requestBody: { title: tarea } });
+      await tasks.tasks.insert({
+        tasklist: '@default',
+        requestBody: { title: tarea }
+      });
+
       await sendMessage(chatId, `✅ Tarea creada: ${tarea}`);
     }
 
-    else if (text.startsWith('crear reunion:')) {
-      const resumen = msg.text.split(':')[1].trim();
+    else if (text.toLowerCase().startsWith('crear reunion:')) {
+      const resumen = text.split(':')[1].trim();
       const fecha = chrono.parseDate(resumen);
       const inicio = fecha || new Date();
       const fin = new Date(inicio.getTime() + 30 * 60000);
@@ -86,7 +89,7 @@ app.post('/webhook', async (req, res) => {
         requestBody: {
           summary: resumen,
           start: { dateTime: inicio.toISOString() },
-          end: { dateTime: fin.toISOString() },
+          end: { dateTime: fin.toISOString() }
         }
       });
 
@@ -94,7 +97,7 @@ app.post('/webhook', async (req, res) => {
     }
 
     else {
-      await sendMessage(chatId, '🤖 Usa:\n- Agregar tarea: [texto]\n- Crear reunion: [texto con fecha]');
+      await sendMessage(chatId, '🤖 Comandos válidos:\n- Agregar tarea: [texto]\n- Crear reunion: [texto con fecha]');
     }
 
     res.sendStatus(200);
@@ -105,21 +108,25 @@ app.post('/webhook', async (req, res) => {
   }
 });
 
+// Utilidad para enviar mensajes a Telegram
 async function sendMessage(chatId, text) {
   try {
-    const res = await axios.post(`https://api.telegram.org/bot${TELEGRAM_TOKEN}/sendMessage`, {
+    const url = `https://api.telegram.org/bot${TELEGRAM_TOKEN}/sendMessage`;
+    const res = await axios.post(url, {
       chat_id: chatId,
       text: text
     });
-    console.log('✅ Enviado:', res.data);
+    console.log('✅ Mensaje enviado:', res.data);
   } catch (error) {
     console.error('❌ Error al enviar mensaje:', error.response?.data || error.message);
   }
 }
 
+// Lanzar servidor
 const PORT = process.env.PORT || 8080;
 app.listen(PORT, () => {
-  console.log(`🚀 Servidor en puerto ${PORT}`);
+  console.log(`🚀 Servidor escuchando en puerto ${PORT}`);
 });
+
 
 
