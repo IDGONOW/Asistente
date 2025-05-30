@@ -13,7 +13,7 @@ app.use(session({ secret: 'asistente-secret', resave: false, saveUninitialized: 
 const CLIENT_ID = process.env.GOOGLE_CLIENT_ID || process.env.CLIENT_ID;
 const CLIENT_SECRET = process.env.GOOGLE_CLIENT_SECRET || process.env.CLIENT_SECRET;
 const REDIRECT_URI =
-  process.env.REDIRECT_URI || `https://${process.env.RAILWAY_STATIC_URL}/auth/callback`;
+  process.env.REDIRECT_URI || `https://${process.env.RAILWAY_STATIC_URL}/auth/oauth2callback`;
 
 const TELEGRAM_TOKEN = process.env.TELEGRAM_TOKEN;
 
@@ -26,7 +26,7 @@ const oAuth2Client = new google.auth.OAuth2(CLIENT_ID, CLIENT_SECRET, REDIRECT_U
 
 // ----------- RUTAS -----------
 
-app.get('/auth', (req, res) => {
+app.get('/oauth2callback', (req, res) => {
   const url = oAuth2Client.generateAuthUrl({
     access_type: 'offline',
     scope: [
@@ -37,7 +37,7 @@ app.get('/auth', (req, res) => {
   res.redirect(url);
 });
 
-app.get('/auth/callback', async (req, res) => {
+app.get('/auth/back', async (req, res) => {
   const code = req.query.code;
   try {
     const { tokens } = await oAuth2Client.getToken(code);
