@@ -4,79 +4,91 @@ const bodyParser = require('body-parser');
 const axios = require('axios');
 const chrono = require('chrono-node');
 const { google } = require('googleapis');
+const session = require('express-session');
 const moment = require('moment-timezone');
 
 const app = express();
+const PORT = process.env.PORT || 8080;
+
 app.use(bodyParser.json());
+app.use(session({ secret: 'asistente-secreto', resave: false, saveUninitialized: true }));
 
 const TELEGRAM_TOKEN = process.env.TELEGRAM_TOKEN;
 const TELEGRAM_API = `https://api.telegram.org/bot${TELEGRAM_TOKEN}`;
+const CHAT_ID = process.env.CHAT_ID;
 
-const CLIENT_ID = process.env.CLIENT_ID;
-const CLIENT_SECRET = process.env.CLIENT_SECRET;
-const REDIRECT_URI = process.env.REDIRECT_URI;
-const REFRESH_TOKEN = process.env.REFRESH_TOKEN;
+const oauth2Client = new google.auth.OAuth2(
+  process.env.CLIENT_ID,
+  process.env.CLIENT_SECRET,
+  process.env.REDIRECT_URI
+);
 
-const oauth2Client = new google.auth.OAuth2(CLIENT_ID, CLIENT_SECRET, REDIRECT_URI);
-oauth2Client.setCredentials({ refresh_token: REFRESH_TOKEN });
-
-const calendar = google.calendar({ version: 'v3', auth: oauth2Client });
-const tasks = google.tasks({ version: 'v1', auth: oauth2Client });
+let userCredentials = null;
 
 app.get('/auth', (req, res) => {
-  const authUrl = oauth2Client.generateAuthUrl({
+  const url = oauth2Client.generateAuthUrl({
     access_type: 'offline',
-    scope: [
-      'https://www.googleapis.com/auth/calendar',
-      'https://www.googleapis.com/auth/tasks'
-    ]
+    scope: ['https://www.googleapis.com/auth/calendar', 'https://www.googleapis.com/auth/tasks']
   });
-  res.redirect(authUrl);
+  res.redirect(url);
 });
 
 app.get('/oauth2callback', async (req, res) => {
   const { code } = req.query;
   const { tokens } = await oauth2Client.getToken(code);
   oauth2Client.setCredentials(tokens);
+  userCredentials = tokens;
   res.send('✅ Autenticación exitosa. Puedes volver a Telegram.');
 });
 
-function parseDate(text) {
-  const result = chrono.parse(text, new Date(), { forwardDate: true });
-  if (result.length > 0) {
-    return moment(result[0].start.date()).tz('America/Lima').format();
-  }
-  return null;
-}
-
-async function createTask(title) {
-  await tasks.tasks.insert({
-    tasklist: '@default',
-    requestBody: { title }
+function sendTelegramMessage(chatId, text) {
+  return axios.post(`${TELEGRAM_API}/sendMessage`, {
+    chat_id: chatId,
+    text,
   });
 }
 
-async function createEvent(summary, startTime) {
-  const endTime = moment(startTime).add(1, 'hour').format();
+async function addGoogleTask(taskText) {
+  if (!userCredentials) return;
+  oauth2Client.setCredentials(userCredentials);
+  const tasks = google.tasks({ version: 'v1', auth: oauth2Client });
+  await tasks.tasks.insert({
+    tasklist: '@default',
+    requestBody: { title: taskText },
+  });
+}
+
+async function createGoogleCalendarEvent(summary, dateText) {
+  if (!userCredentials) return;
+  oauth2Client.setCredentials(userCredentials);
+  const calendar = google.calendar({ version: 'v3', auth: oauth2Client });
+
+  const now = moment();
+  let parsedDate = chrono.parseDate(dateText);
+
+  // Validar si parsedDate es valido
+  if (!parsedDate || isNaN(parsedDate.getTime())) {
+    return `❌ No entendí la fecha. Usa un formato como "3 de junio a las 11 am"`;
+  }
+
+  // Si la fecha interpretada es pasada, intentar usar el próximo año
+  if (parsedDate < now.toDate()) {
+    parsedDate = moment(parsedDate).add(1, 'year').toDate();
+  }
+
+  // Ajustar zona horaria
+  const start = moment(parsedDate).tz('America/Lima').format();
+  const end = moment(parsedDate).add(1, 'hour').tz('America/Lima').format();
+
   await calendar.events.insert({
     calendarId: 'primary',
     requestBody: {
       summary,
-      start: { dateTime: startTime },
-      end: { dateTime: endTime }
-    }
+      start: { dateTime: start, timeZone: 'America/Lima' },
+      end: { dateTime: end, timeZone: 'America/Lima' },
+    },
   });
-}
-
-async function sendMessage(chatId, text) {
-  try {
-    await axios.post(`${TELEGRAM_API}/sendMessage`, {
-      chat_id: chatId,
-      text
-    });
-  } catch (err) {
-    console.error('❌ Error al enviar mensaje a Telegram:\n', err.response.data);
-  }
+  return `📅 Reunión "${summary}" agendada para ${moment(start).format('LLLL')}`;
 }
 
 app.post('/webhook', async (req, res) => {
@@ -84,33 +96,33 @@ app.post('/webhook', async (req, res) => {
   if (!message || !message.text) return res.sendStatus(200);
 
   const chatId = message.chat.id;
-  const text = message.text.toLowerCase();
+  const text = message.text;
 
-  if (text.startsWith('agregar tarea:')) {
-    const taskText = text.replace('agregar tarea:', '').trim();
-    await createTask(taskText);
-    await sendMessage(chatId, `📝 Tarea creada: ${taskText}`);
-  } else if (text.startsWith('crear reunion:')) {
-    const eventText = text.replace('crear reunion:', '').trim();
-    const date = parseDate(eventText);
-    if (date) {
-      await createEvent(eventText, date);
-      await sendMessage(chatId, `📅 Reunión creada: ${eventText} a las ${moment(date).tz('America/Lima').format('HH:mm')}`);
+  console.log('📨 Mensaje recibido:', text);
+
+  try {
+    if (text.toLowerCase().startsWith('agregar tarea:')) {
+      const taskText = text.replace(/agregar tarea:/i, '').trim();
+      await addGoogleTask(taskText);
+      await sendTelegramMessage(chatId, `✅ Tarea agregada: "${taskText}"`);
+    } else if (text.toLowerCase().startsWith('crear reunion:')) {
+      const parts = text.replace(/crear reunion:/i, '').trim().split(/(mañana|hoy|\d{1,2} (de )?[a-záéíóú]+|\d{1,2}\/\d{1,2}|\d{4}-\d{2}-\d{2})/i);
+      const summary = parts[0].trim();
+      const dateText = text.replace(/crear reunion:/i, '').trim().replace(summary, '').trim();
+      const result = await createGoogleCalendarEvent(summary, dateText);
+      await sendTelegramMessage(chatId, result);
     } else {
-      await sendMessage(chatId, '❌ No pude entender la fecha.');
+      await sendTelegramMessage(chatId, '🤖 Comando no reconocido. Usa "Agregar tarea: ..." o "Crear reunion: ..."');
     }
-  } else {
-    await sendMessage(chatId, '🤖 Comando no reconocido. Usa "Agregar tarea:" o "Crear reunion:"');
+  } catch (err) {
+    console.error('❌ Error en webhook:', err);
+    await sendTelegramMessage(chatId, '⚠️ Hubo un error al procesar tu solicitud.');
   }
-
   res.sendStatus(200);
 });
 
-const PORT = process.env.PORT || 8080;
 app.listen(PORT, () => {
   console.log(`🚀 Escuchando en puerto ${PORT}`);
 });
-
-
 
 
