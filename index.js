@@ -18,8 +18,8 @@ const TELEGRAM_API = `https://api.telegram.org/bot${TELEGRAM_TOKEN}`;
 const CHAT_ID = process.env.CHAT_ID;
 
 const oauth2Client = new google.auth.OAuth2(
-  process.env.CLIENT_ID,
-  process.env.CLIENT_SECRET,
+  process.env.GOOGLE_CLIENT_ID,
+  process.env.GOOGLE_CLIENT_SECRET,
   process.env.REDIRECT_URI
 );
 
@@ -66,17 +66,14 @@ async function createGoogleCalendarEvent(summary, dateText) {
   const now = moment();
   let parsedDate = chrono.parseDate(dateText);
 
-  // Validar si parsedDate es valido
   if (!parsedDate || isNaN(parsedDate.getTime())) {
     return `❌ No entendí la fecha. Usa un formato como "3 de junio a las 11 am"`;
   }
 
-  // Si la fecha interpretada es pasada, intentar usar el próximo año
   if (parsedDate < now.toDate()) {
     parsedDate = moment(parsedDate).add(1, 'year').toDate();
   }
 
-  // Ajustar zona horaria
   const start = moment(parsedDate).tz('America/Lima').format();
   const end = moment(parsedDate).add(1, 'hour').tz('America/Lima').format();
 
@@ -124,5 +121,6 @@ app.post('/webhook', async (req, res) => {
 app.listen(PORT, () => {
   console.log(`🚀 Escuchando en puerto ${PORT}`);
 });
+
 
 
